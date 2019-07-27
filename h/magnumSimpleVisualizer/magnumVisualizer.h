@@ -36,6 +36,7 @@
 #include <Magnum/Shaders/VertexColor.h>
 #include <Magnum/Shaders/visibility.h>
 #include <Magnum/DimensionTraits.h>
+#include <chrono>
 
 namespace Magnum {
 
@@ -255,12 +256,17 @@ class magnumVisualizer: public Platform::Application {
             _objects.push_back(new PickableObject{_objects.size()+1, &_vertexShader, 0xa5c9ea_rgbf, _cube, _scene, _drawables});
             _objectReferencedPos.insert(std::make_pair(_objects.back(), pos));
             _objectReferencedRot.insert(std::make_pair(_objects.back(), rot));
-            return _objects.size();
+            return _objects.size()-1;
         };
         int add3dAxisGUI(float posx = 0.0, float posy = 0.0, float posz = 0.0){
             _objects.push_back(new PickableObject{_objects.size()+1, &_vertexShader, 0xa5c9ea_rgbf, _cube, _scene, _drawables});
             _objects.back()->translate(Vector3(posx, posy, posz));
-            return _objects.size();
+
+            for(auto* o: _objects) o->setSelected(false);
+            _objects.back()->setSelected(true);
+            _selectedPrimative = _objects.size()-1;
+
+            return _objects.size()-1;
         };
 
         int addCylinder(float* pos, float* rot, const float s = 1.0f, const Color3 color = 0x3bd267_rgbf) {
@@ -268,10 +274,11 @@ class magnumVisualizer: public Platform::Application {
             _objects.back()->scale(Vector3(s));
             _objectReferencedPos.insert(std::make_pair(_objects.back(), pos));
             _objectReferencedRot.insert(std::make_pair(_objects.back(), rot));
-            return _objects.size();
+            return _objects.size()-1;
         }
         bool getPos(int id, float pos[3]);
         bool getRot(int id, float rot[9]);
+        bool timeStateUpdates;
     private:
         void drawEvent() override;
         void mousePressEvent(MouseEvent& event) override;
@@ -279,7 +286,19 @@ class magnumVisualizer: public Platform::Application {
         void mouseReleaseEvent(MouseEvent& event) override;
         void keyPressEvent(KeyEvent& event) override;
         void tickEvent() override {
-            stateUpdate();
+          if(!m_pause || (m_pause && m_stepOneFrame)){
+            if(timeStateUpdates){
+              auto t1 = std::chrono::high_resolution_clock::now();
+              stateUpdate();
+              auto t2 = std::chrono::high_resolution_clock::now();
+
+              std::chrono::duration<double, std::nano> fp_ns = t2 - t1;
+              _avgStateUpdateTime += 1E-2*(fp_ns.count()-_avgStateUpdateTime);
+              std::cout << "stateUpdate() took " << fp_ns.count() << " nanoseconds, low pass avg = "<<_avgStateUpdateTime << std::endl;
+            }
+            else stateUpdate();
+            m_stepOneFrame = false;
+          }
             // updateCameraLocation();
             updateObjectStateFromReference();
         };
@@ -307,13 +326,15 @@ class magnumVisualizer: public Platform::Application {
         bool m_stepOneFrame;
         bool m_pause;
         int _selectedPrimative;
+        int _avgStateUpdateTime;
 
         Vector2i _previousMousePosition, _mousePressPosition;
 };
 bool magnumVisualizer::getPos(int id, float pos[3]){
     if(id >= 0 && id<_objects.size()){
-        Magnum::Math::Matrix4 ct = _objects[id]->transformationMatrix();
+        Magnum::Math::Matrix4<float> ct = _objects[id]->transformationMatrix();
         for(int j=0; j<3; j++)  pos[j] = ct.translation()[j];
+        // std::cout << "id: "<< id << "pos[0] "<< cttranslation(0) << std::endl;
         return true;
     }
     else return false;
@@ -321,7 +342,7 @@ bool magnumVisualizer::getPos(int id, float pos[3]){
 
 bool magnumVisualizer::getRot(int id, float rot[9]){
     if(id >= 0 && id<_objects.size()){
-        Magnum::Math::Matrix4 ct = _objects[id]->transformationMatrix();
+        Magnum::Math::Matrix4<float> ct = _objects[id]->transformationMatrix();
         int k = 0;
         for(int j=0; j<3; j++)  rot[k++] = ct.right()[j];
         for(int j=0; j<3; j++)  rot[k++] = ct.up()[j];
@@ -332,7 +353,7 @@ bool magnumVisualizer::getRot(int id, float rot[9]){
 };
 
 void magnumVisualizer::updateCameraLocation(){
-    Magnum::Math::Matrix4  ct = _cameraObject->transformationMatrix();
+    Magnum::Math::Matrix4<float>  ct = _cameraObject->transformationMatrix();
     ct.translation() = _cameraObject->transformationMatrix().rotation()*Vector3(_cameraPosX, _cameraPosY, _cameraPosZ);
     _cameraObject->setTransformation(ct);
     redraw();
@@ -341,14 +362,14 @@ void magnumVisualizer::updateCameraLocation(){
 void magnumVisualizer::updateObjectStateFromReference(){
     for(auto &p: _objectReferencedPos)
     {
-        Magnum::Math::Matrix4  ct = p.first->transformationMatrix();
+        Magnum::Math::Matrix4<float>  ct = p.first->transformationMatrix();
         ct.translation() = Vector3(p.second[0],p.second[1],p.second[2]);
         p.first->setTransformation(ct);
     }
 
     for(auto &p: _objectReferencedRot)
     {
-        Magnum::Math::Matrix4  ct = p.first->transformationMatrix();
+        Magnum::Math::Matrix4<float>  ct = p.first->transformationMatrix();
         ct.right() = Vector3(p.second[0],p.second[1],p.second[2]);
         ct.up() = Vector3(p.second[3],p.second[4],p.second[5]);
         ct.backward() = Vector3(p.second[6],p.second[7],p.second[8]);
@@ -359,6 +380,8 @@ void magnumVisualizer::updateObjectStateFromReference(){
 
 magnumVisualizer::magnumVisualizer(const Arguments& arguments):
     _cameraPosX(0.0f), _cameraPosY(0.0f), _cameraPosZ(8.0f),
+    m_pause(false), m_stepOneFrame(false), timeStateUpdates(true),
+    _avgStateUpdateTime(0),
     Platform::Application{arguments, Configuration{}.setTitle("Magnum object picking example")}, _framebuffer{GL::defaultFramebuffer.viewport()} {
     MAGNUM_ASSERT_GL_VERSION_SUPPORTED(GL::Version::GL430);
 
@@ -526,24 +549,48 @@ void magnumVisualizer::keyPressEvent(KeyEvent& event) {
         case Magnum::Platform::Sdl2Application::KeyEvent::Key::Right:
             break;
         case Magnum::Platform::Sdl2Application::KeyEvent::Key::Home:
-            // _primRotXYZ[_selectable2primIdx[_selectedPrimative]][0] += 0.1f;
+            if(_selectedPrimative>=0){
+                Math::Rad<float> a(0.1);
+                _objects[_selectedPrimative]->rotateLocal(a, Vector3(1,0,0));
+                redraw();
+            }
             break;
         case Magnum::Platform::Sdl2Application::KeyEvent::Key::End:
-            // _primRotXYZ[_selectable2primIdx[_selectedPrimative]][0] -= 0.1f;
+            if(_selectedPrimative>=0){
+                Math::Rad<float> a(0.1);
+                _objects[_selectedPrimative]->rotateLocal(a, Vector3(-1,0,0));
+                redraw();
+            }
             break;
         case Magnum::Platform::Sdl2Application::KeyEvent::Key::PageUp:
-            // _primRotXYZ[_selectable2primIdx[_selectedPrimative]][2] -= 0.1f;
+            if(_selectedPrimative>=0){
+                Math::Rad<float> a(0.1);
+                _objects[_selectedPrimative]->rotateLocal(a, Vector3(0,0,-1));
+                redraw();
+            }
             break;
         case Magnum::Platform::Sdl2Application::KeyEvent::Key::PageDown:
-            // _primRotXYZ[_selectable2primIdx[_selectedPrimative]][1] -= 0.1f;
+            if(_selectedPrimative>=0){
+                Math::Rad<float> a(0.1);
+                _objects[_selectedPrimative]->rotateLocal(a, Vector3(0,-1,0));
+                redraw();
+            }
             break;
         case Magnum::Platform::Sdl2Application::KeyEvent::Key::Backspace:
             break;
         case Magnum::Platform::Sdl2Application::KeyEvent::Key::Insert:
-            // _primRotXYZ[_selectable2primIdx[_selectedPrimative]][2] += 0.1f;
+        if(_selectedPrimative>=0){
+            Math::Rad<float> a(0.1);
+            _objects[_selectedPrimative]->rotateLocal(a, Vector3(0,0,1));
+            redraw();
+        }
             break;
         case Magnum::Platform::Sdl2Application::KeyEvent::Key::Delete:
-            // _primRotXYZ[_selectable2primIdx[_selectedPrimative]][1] += 0.1f;
+          if(_selectedPrimative>=0){
+              Math::Rad<float> a(0.1);
+              _objects[_selectedPrimative]->rotateLocal(a, Vector3(0,1,0));
+              redraw();
+          }
             break;
         case Magnum::Platform::Sdl2Application::KeyEvent::Key::F1:
             break;
